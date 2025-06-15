@@ -1,0 +1,22 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.espIdfPathWin": "C:\\Users\\jules\\esp\\v5.4\\esp-idf",
+  "idf.pythonInstallPath": "C:\\Users\\jules\\.espressif\\tools\\idf-python\\3.11.2\\python.exe",
+  "idf.openOcdConfigs": [
+    "target/esp32s3.cfg"
+  ],
+  "idf.toolsPathWin": "C:\\Users\\jules\\.espressif",
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32s3"
+  },
+  "idf.portWin": "COM5",
+  "idf.flashType": "UART",
+  "files.associations": {
+    "adc.h": "c",
+    "gpio.h": "c",
+    "esp_log.h": "c",
+    "freertos.h": "c",
+    "esp_gap_ble_api.h": "c",
+    "esp_sleep.h": "c"
+  }
+}
