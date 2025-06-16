@@ -1,126 +1,102 @@
+
 #include <stdio.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/timers.h"
-#include "driver/gpio.h"
-#include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_bt.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gatts_api.h"
 #include "esp_bt_main.h"
 #include "esp_gatt_common_api.h"
-#include "esp_sleep.h"
+#include "esp_log.h"
+#include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
+#include "esp_timer.h"
 
-static const char *TAG = "COMBINED_APP";
+static const char *TAG = "BLE_ADC_BATTERY";
 
-// --- Pin definitions ---
-#define BUTTON_SLEEP_GPIO   GPIO_NUM_1   // Knop voor deep sleep (input, pull-up)
-#define BUTTON_WAKE_GPIO    GPIO_NUM_0   // Knop om uit deep sleep te komen (EXT0 wakeup pin, input, pull-up)
-#define BUTTON_LED_TOGGLE   GPIO_NUM_2   // Knop om LED aan/uit te schakelen (input, pull-up)
-#define LED_GPIO            GPIO_NUM_19  // LED output
-
-// ADC config
-#define ADC_GPIO            GPIO_NUM_4
-#define ADC_UNIT            ADC_UNIT_1
-#define ADC_CHANNEL         ADC_CHANNEL_4  // GPIO4 = ADC1_CHANNEL_4
-#define ADC_ATTEN           ADC_ATTEN_DB_12 // 0-3.6V range
-#define ADC_BIT_WIDTH       ADC_BITWIDTH_12
-
-#define DEBOUNCE_DELAY_MS  100
-
-// BLE UUIDs
+// BLE Service & Char UUIDs
 #define GATTS_SERVICE_UUID_BATTERY    0x180F
 #define GATTS_CHAR_UUID_BATTERY_LEVEL 0x2A19
 #define GATTS_NUM_HANDLE              4
 
-// --- Globals BLE ---
+// GPIO voor knop en LED
+#define GPIO_BUTTON     2
+#define GPIO_LED        19
+#define DEBOUNCE_TIME_MS 200
+
+// ADC-configuratie
+#define GPIO_ADC_ENABLE    3
+#define ADC_GPIO           4
+#define ADC_CHANNEL        ADC_CHANNEL_3  // GPIO4 komt overeen met kanaal 3 op unit 1
+#define ADC_UNIT           ADC_UNIT_1
+#define ADC_ATTEN          ADC_ATTEN_DB_12
+#define ADC_BIT_WIDTH      ADC_BITWIDTH_12
+
+// BLE state
 static uint16_t gatts_if_global = 0;
 static uint16_t conn_id_global = 0;
 static uint16_t battery_level_handle = 0;
 static uint16_t cccd_handle = 0;
 static bool is_connected = false;
 static bool notify_enabled = false;
+static uint8_t battery_level = 0; // Batterijpercentage
 
-// Battery level 0..100%
-static uint8_t battery_level = 0;
+// ADC
+static adc_oneshot_unit_handle_t adc_handle;
 
-// Timers
-static TimerHandle_t debounce_timer_sleep;
-static TimerHandle_t debounce_timer_button;
-static volatile bool button_press_pending = false;
+// Knop/LED status
+static bool led_state = false;
+static int64_t last_button_press_time = 0;
 
-// ADC handle
-static adc_oneshot_unit_handle_t adc_handle = NULL;
+void init_adc(void);
+uint8_t read_battery_percentage(void);
 
-// --- Forward declarations BLE handlers ---
-static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
-static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
-                                        esp_ble_gatts_cb_param_t *param);
 
-                                        
 
-// --- Debounce timer callback for deep sleep button ---
-static void debounce_timer_sleep_cb(TimerHandle_t xTimer)
-{
-    // Check knop nog steeds ingedrukt (active low)
-    if (gpio_get_level(BUTTON_SLEEP_GPIO) == 0) {
-        ESP_LOGI(TAG, "Sleep knop bevestigd, ga in deep sleep");
+// Functie om knop te controleren en LED te togglen met debounce
+void check_button_toggle_led() {
+    static bool last_button_state = true; // Start met niet-ingedrukt (hoog door pull-up)
+    bool current_state = gpio_get_level(GPIO_BUTTON);
+    int64_t now = esp_timer_get_time() / 1000; // in ms
 
-        // LED uitzetten vlak voor slapen
-        gpio_set_level(LED_GPIO, 0);
-
-        // Configureer wake-up bron: EXT0 op BUTTON_WAKE_GPIO, active low
-        esp_sleep_enable_ext0_wakeup(BUTTON_WAKE_GPIO, 0);
-
-        // Start deep sleep
-        esp_deep_sleep_start();
-    } else {
-        ESP_LOGI(TAG, "Sleep knop niet meer ingedrukt, negeer");
+    if (!current_state && last_button_state) {
+        if (now - last_button_press_time > DEBOUNCE_TIME_MS) {
+            // Geldige druk
+            led_state = !led_state;
+            gpio_set_level(GPIO_LED, led_state);
+            ESP_LOGI(TAG, "Knop gedrukt - LED %s", led_state ? "AAN" : "UIT");
+            last_button_press_time = now;
+        }
     }
+
+    last_button_state = current_state;
+}
+// Initialiseer GPIO's voor knop en LED
+void init_gpio_button_led() {
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << GPIO_BUTTON),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+
+    io_conf.pin_bit_mask = (1ULL << GPIO_LED);
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    gpio_config(&io_conf);
+
+    gpio_set_level(GPIO_LED, led_state); // Startstatus
 }
 
-// ISR voor deep sleep knop
-static void IRAM_ATTR gpio_isr_handler_sleep(void* arg)
-{
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xTimerStartFromISR(debounce_timer_sleep, &xHigherPriorityTaskWoken);
-    if (xHigherPriorityTaskWoken == pdTRUE) {
-        portYIELD_FROM_ISR();
-    }
-}
 
-// --- Debounce timer callback voor LED toggle knop ---
-static void debounce_timer_button_cb(TimerHandle_t xTimer)
-{
-    int level = gpio_get_level(BUTTON_LED_TOGGLE);
-    if (level == 0) {
-        int led_level = gpio_get_level(LED_GPIO);
-        gpio_set_level(LED_GPIO, !led_level);
-        ESP_LOGI(TAG, "Button pressed, LED toggled to %d", !led_level);
-    }
-    button_press_pending = false;
-}
-
-// ISR voor LED toggle knop
-static void IRAM_ATTR gpio_isr_handler_button(void* arg)
-{
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    if (!button_press_pending) {
-        button_press_pending = true;
-        xTimerStartFromISR(debounce_timer_button, &xHigherPriorityTaskWoken);
-    }
-    if (xHigherPriorityTaskWoken == pdTRUE) {
-        portYIELD_FROM_ISR();
-    }
-}
-
-// --- BLE event handlers ---
-static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
-{
+// BLE GAP event handler
+static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
     switch (event) {
-        case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT: {
+        case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
             ESP_LOGI(TAG, "Adv data set complete, start advertising");
             esp_ble_adv_params_t adv_params = {
                 .adv_int_min = 0x20,
@@ -132,19 +108,70 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
             };
             esp_ble_gap_start_advertising(&adv_params);
             break;
-        }
         default:
             break;
     }
 }
-
-static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
-                                        esp_ble_gatts_cb_param_t *param)
+// Functie om spanning te lezen en om te zetten naar % batterij
+uint8_t read_battery_percentage()
 {
+    int raw = 0;
+    esp_err_t ret = adc_oneshot_read(adc_handle, ADC_CHANNEL, &raw);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ADC lezen mislukt: %s", esp_err_to_name(ret));
+        return 0;
+    }
+
+    float voltage = (raw * 3.3f / 4095.0f) * 1000.0f;  // naar mV
+    voltage *= 2.0f; // als er spanningsdeler wordt gebruikt
+
+    ESP_LOGI(TAG, "ADC Raw: %d, voltage: %.2f mV", raw, voltage);
+
+    // Eenvoudige mapping van voltage naar % (bijv. 3000mV = 0%, 4200mV = 100%)
+    float percentage = (voltage - 3000.0f) / (4200.0f - 3000.0f) * 100.0f;
+
+    if (percentage > 100.0f) percentage = 100.0f;
+    if (percentage < 0.0f) percentage = 0.0f;
+
+    return (uint8_t)percentage;
+}
+void init_adc()
+{
+    // GPIO configureren voor ADC enable (GPIO3 als uitgang)
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << GPIO_ADC_ENABLE),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
+
+    // Zet ADC enable hoog
+    gpio_set_level(GPIO_ADC_ENABLE, 1);
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Even wachten
+
+    // Initialiseer ADC unit
+    adc_oneshot_unit_init_cfg_t init_cfg = {
+        .unit_id = ADC_UNIT_1,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_cfg, &adc_handle));
+
+    // Kanaal configureren
+    adc_oneshot_chan_cfg_t chan_cfg = {
+        .atten = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BIT_WIDTH,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, ADC_CHANNEL, &chan_cfg));
+}
+// BLE GATTS event handler
+static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
+                                        esp_ble_gatts_cb_param_t *param) {
     switch (event) {
         case ESP_GATTS_REG_EVT: {
             ESP_LOGI(TAG, "GATTS_REG_EVT");
-            esp_ble_gap_set_device_name("ESP32-BatteryADC");
+            esp_ble_gap_set_device_name("ESP32-Battery");
             esp_ble_gap_config_adv_data(&(esp_ble_adv_data_t){
                 .set_scan_rsp = false,
                 .include_name = true,
@@ -189,7 +216,6 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
             ESP_LOGI(TAG, "GATTS_ADD_CHAR_EVT, attr_handle = %d", param->add_char.attr_handle);
             battery_level_handle = param->add_char.attr_handle;
 
-            // Voeg CCCD toe
             esp_bt_uuid_t descr_uuid = {
                 .len = ESP_UUID_LEN_16,
                 .uuid.uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG,
@@ -220,6 +246,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
             ESP_LOGI(TAG, "Client disconnected");
             is_connected = false;
             notify_enabled = false;
+
             esp_ble_adv_params_t adv_params = {
                 .adv_int_min = 0x20,
                 .adv_int_max = 0x40,
@@ -233,69 +260,55 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
         }
 
         case ESP_GATTS_WRITE_EVT: {
-            ESP_LOGI(TAG, "GATTS_WRITE_EVT, handle %d, len %d", param->write.handle, param->write.len);
-
             if (param->write.handle == cccd_handle && param->write.len == 2) {
                 uint16_t descr_value = param->write.value[0] | (param->write.value[1] << 8);
                 notify_enabled = (descr_value == 0x0001);
+                ESP_LOGI(TAG, "Notify %s by client", notify_enabled ? "enabled" : "disabled");
             }
+
             if (param->write.need_rsp) {
                 esp_ble_gatts_send_response(gatts_if, param->write.conn_id,
-                                           param->write.trans_id, ESP_GATT_OK, NULL);
+                                            param->write.trans_id, ESP_GATT_OK, NULL);
             }
             break;
         }
+
         default:
             break;
     }
 }
 
+uint8_t read_battery_percentage_with_enable(bool enable)
+{
+    gpio_set_level(GPIO_ADC_ENABLE, enable ? 1 : 0);
+    vTaskDelay(pdMS_TO_TICKS(10));  // korte stabilisatie
+
+    int raw = 0;
+    esp_err_t ret = adc_oneshot_read(adc_handle, ADC_CHANNEL, &raw);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ADC lezen mislukt (%s): enable=%d", esp_err_to_name(ret), enable);
+        return 0;
+    }
+
+    float voltage = (raw * 3.3f / 4095.0f) * 1000.0f;
+    voltage *= 2.0f;
+
+    ESP_LOGI(TAG, "[%s] ADC Raw: %d, Voltage: %.2f mV",
+             enable ? "AAN" : "UIT", raw, voltage);
+
+    float percentage = (voltage - 3000.0f) / (4200.0f - 3000.0f) * 100.0f;
+    if (percentage > 100.0f) percentage = 100.0f;
+    if (percentage < 0.0f) percentage = 0.0f;
+
+    return (uint8_t)percentage;
+}
+
 void app_main(void)
 {
-     // Sleep knop input (GPIO1), pull-up, falling edge interrupt
-    gpio_config_t sleep_btn_conf = {
-        .pin_bit_mask = (1ULL << BUTTON_SLEEP_GPIO),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_NEGEDGE,
-    };
-    gpio_config(&sleep_btn_conf);
-
-    // Wake knop input (GPIO0), pull-up, geen interrupt
-    gpio_config_t wake_btn_conf = {
-        .pin_bit_mask = (1ULL << BUTTON_WAKE_GPIO),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&wake_btn_conf);
-
-    // LED toggle knop input (GPIO2), pull-up, falling edge interrupt
-    gpio_config_t btn_conf = {
-        .pin_bit_mask = (1ULL << BUTTON_LED_TOGGLE),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_NEGEDGE,
-    };
-    gpio_config(&btn_conf);
-
-       // LED output
-    gpio_config_t led_conf = {
-        .pin_bit_mask = (1ULL << LED_GPIO),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&led_conf);
-    
-    gpio_set_level(LED_GPIO, 0);
     esp_err_t ret;
 
-    // --- NVS init ---
+    // NVS init
     ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -303,7 +316,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    // --- Bluetooth controller init only BLE ---
+    // Bluetooth stack init
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
@@ -315,57 +328,46 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_ble_gatts_register_callback(gatts_profile_event_handler));
     ESP_ERROR_CHECK(esp_ble_gatts_app_register(0));
 
+    init_adc();              // Init ADC
+    init_gpio_button_led();  // Init GPIO voor knop en LED
 
+    int loop_counter = 0;
 
-    // --- Maak debounce timers aan ---
-    debounce_timer_sleep = xTimerCreate("debounce_sleep", pdMS_TO_TICKS(DEBOUNCE_DELAY_MS), pdFALSE, NULL, debounce_timer_sleep_cb);
-    debounce_timer_button = xTimerCreate("debounce_button", pdMS_TO_TICKS(DEBOUNCE_DELAY_MS), pdFALSE, NULL, debounce_timer_button_cb);
-
-    // --- Installeer ISR service en koppel ISR handlers ---
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(BUTTON_SLEEP_GPIO, gpio_isr_handler_sleep, NULL);
-    gpio_isr_handler_add(BUTTON_LED_TOGGLE, gpio_isr_handler_button, NULL);
-
-    // --- ADC setup ---
-    adc_oneshot_unit_init_cfg_t adc_init_cfg = {
-        .unit_id = ADC_UNIT,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&adc_init_cfg, &adc_handle));
-
-    adc_oneshot_chan_cfg_t chan_cfg = {
-        .atten = ADC_ATTEN,
-        .bitwidth = ADC_BIT_WIDTH,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, ADC_CHANNEL, &chan_cfg));
-
-    ESP_LOGI(TAG, "Start main loop");
-
+     // Hoofdlus
     while (1) {
-        int raw = 0;
-        ret = adc_oneshot_read(adc_handle, ADC_CHANNEL, &raw);
-        if (ret == ESP_OK) {
-            float voltage = (raw * 3.3f) / 4095.0f;
-            // Indien voltage divider aanwezig, corrigeer hier (bijv x2)
-            // voltage *= 2;
+        check_button_toggle_led();  // Check knop elke 100 ms
 
-            battery_level = (uint8_t)(voltage / 3.3f * 100);
-
-            ESP_LOGI(TAG, "ADC Raw: %d, Voltage: %.2f V, Battery Level: %d%%", raw, voltage, battery_level);
+        // Elke 5 seconden beide waardes lezen
+        if (loop_counter % 50 == 0) {
+            // 1. Meting met ADC enable AAN
+            uint8_t batt_on = read_battery_percentage_with_enable(true);
+            ESP_LOGI(TAG, "Batterij actief (AAN): %d%%", batt_on);
 
             if (is_connected && notify_enabled) {
                 esp_ble_gatts_send_indicate(gatts_if_global, conn_id_global,
-                                           battery_level_handle,
-                                           sizeof(battery_level),
-                                           &battery_level,
-                                           false);
-                ESP_LOGI(TAG, "Notify sent");
+                                            battery_level_handle,
+                                            sizeof(batt_on), &batt_on, false);
+                ESP_LOGI(TAG, "Notificatie verzonden: [AAN]");
             }
-        } else {
-            ESP_LOGE(TAG, "ADC read failed: %s", esp_err_to_name(ret));
+
+            vTaskDelay(pdMS_TO_TICKS(1000));  // Wacht 1 seconde
+
+            // 2. Meting met ADC enable UIT
+            uint8_t batt_off = read_battery_percentage_with_enable(false);
+            ESP_LOGI(TAG, "Batterij passief (UIT): %d%%", batt_off);
+
+            if (is_connected && notify_enabled) {
+                esp_ble_gatts_send_indicate(gatts_if_global, conn_id_global,
+                                            battery_level_handle,
+                                            sizeof(batt_off), &batt_off, false);
+                ESP_LOGI(TAG, "Notificatie verzonden: [UIT]");
+            }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        loop_counter++;
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
+
 }
 
 
