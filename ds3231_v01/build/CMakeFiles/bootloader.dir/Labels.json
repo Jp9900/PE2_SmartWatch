@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "C:/Users/jules/OneDrive/Documents/Electronica-ICT2024-2025/PE2/ESP_PROJECTS/Start/ESP-C6-WROOM/ds3231/esp-idf-ds3231/build/CMakeFiles/bootloader"
+		},
+		{
+			"file" : "C:/Users/jules/OneDrive/Documents/Electronica-ICT2024-2025/PE2/ESP_PROJECTS/Start/ESP-C6-WROOM/ds3231/esp-idf-ds3231/build/CMakeFiles/bootloader.rule"
+		},
+		{
+			"file" : "C:/Users/jules/OneDrive/Documents/Electronica-ICT2024-2025/PE2/ESP_PROJECTS/Start/ESP-C6-WROOM/ds3231/esp-idf-ds3231/build/CMakeFiles/bootloader-complete.rule"
+		},
+		{
+			"file" : "C:/Users/jules/OneDrive/Documents/Electronica-ICT2024-2025/PE2/ESP_PROJECTS/Start/ESP-C6-WROOM/ds3231/esp-idf-ds3231/build/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule"
+		},
+		{
+			"file" : "C:/Users/jules/OneDrive/Documents/Electronica-ICT2024-2025/PE2/ESP_PROJECTS/Start/ESP-C6-WROOM/ds3231/esp-idf-ds3231/build/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule"
+		},
+		{
+			"file" : "C:/Users/jules/OneDrive/Documents/Electronica-ICT2024-2025/PE2/ESP_PROJECTS/Start/ESP-C6-WROOM/ds3231/esp-idf-ds3231/build/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule"
+		},
+		{
+			"file" : "C:/Users/jules/OneDrive/Documents/Electronica-ICT2024-2025/PE2/ESP_PROJECTS/Start/ESP-C6-WROOM/ds3231/esp-idf-ds3231/build/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule"
+		},
+		{
+			"file" : "C:/Users/jules/OneDrive/Documents/Electronica-ICT2024-2025/PE2/ESP_PROJECTS/Start/ESP-C6-WROOM/ds3231/esp-idf-ds3231/build/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule"
+		},
+		{
+			"file" : "C:/Users/jules/OneDrive/Documents/Electronica-ICT2024-2025/PE2/ESP_PROJECTS/Start/ESP-C6-WROOM/ds3231/esp-idf-ds3231/build/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule"
+		},
+		{
+			"file" : "C:/Users/jules/OneDrive/Documents/Electronica-ICT2024-2025/PE2/ESP_PROJECTS/Start/ESP-C6-WROOM/ds3231/esp-idf-ds3231/build/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"bootloader"
+		],
+		"name" : "bootloader"
+	}
+}
